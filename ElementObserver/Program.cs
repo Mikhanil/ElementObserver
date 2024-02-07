@@ -144,18 +144,14 @@ void AddCharactersData(in GameInfo gameInfo)
 	}
 }
 
-void RunAndWatch(GameInfo gameInfo, CancellationTokenSource cancellationTokenSource)
+void RunAndWatch(GameInfo gameData, CancellationTokenSource cancellationTokenSource)
 {
-	foreach (var characterData in gameInfo.Characters)
-	{
+	foreach (var characterData in gameData.Characters)
 		Task.Run(async () =>
 		{
-			var file = new FileInfo(gameInfo.ElementExePath);
-			string additionalArgs = string.Empty;
-			if (characterData.LowQuality)
-			{
-				additionalArgs += "nogfx";
-			}
+			var file = new FileInfo(gameData.ElementExePath);
+			var additionalArgs = string.Empty;
+			if (characterData.LowQuality) additionalArgs += "nogfx";
 			var startInfo = new ProcessStartInfo
 			{
 				FileName = file.FullName,
@@ -164,18 +160,41 @@ void RunAndWatch(GameInfo gameInfo, CancellationTokenSource cancellationTokenSou
 					$@"{file.Name} startbypatcher arc:1 novid {additionalArgs} user:{characterData.Login} pwd:{characterData.Password} role:{characterData.Name}"
 			};
 
+			var processes = Process.GetProcesses();
+			foreach (var process in processes)
+				try
+				{
+					if (file.Name.Contains(process.ProcessName, StringComparison.OrdinalIgnoreCase) == false)
+						continue;
+
+					Console.WriteLine($"Found {process.ProcessName}:{process.Id}");
+					var cmd = process.GetCommandLineArgs();
+					var args = cmd.Split(' ');
+					var loginNameData = (from s in args where s.Contains("user") select s.Split(':')).FirstOrDefault();
+					if (loginNameData == null || loginNameData.Length < 2)
+						continue;
+					
+					var logginName = loginNameData[1];
+					if (characterData.Login.Contains(logginName, StringComparison.OrdinalIgnoreCase))
+					{
+						Console.WriteLine($"Attach to {process.ProcessName}:{process.Id}");
+						await process.WaitForExitAsync(cancellationTokenSource.Token);
+						break;
+					}
+				}
+				catch (Exception e)
+				{
+				}
+
 			while (cancellationTokenSource.IsCancellationRequested == false)
 			{
 				Console.WriteLine($"Run {characterData.Login}:{characterData.Name} -> {DateTime.Now}");
 				using var process = new Process();
 				process.StartInfo = startInfo;
-
 				process.Start();
 				SpinWait.SpinUntil(() => process.HasExited || process.MainWindowHandle != IntPtr.Zero);
 				if (!process.HasExited) process.SetWindowText($"{characterData.Login}:{characterData.Name}");
 				await process.WaitForExitAsync(cancellationTokenSource.Token);
 			}
-		
 		}, cancellationTokenSource.Token);
-	}
 }
