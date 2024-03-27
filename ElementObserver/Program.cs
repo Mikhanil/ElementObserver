@@ -13,7 +13,7 @@ var gameInfo = GetOrCreateGameInfo();
 
 Console.WriteLine("Launch Game instances");
 var cts = new CancellationTokenSource();
-RunAndWatch(gameInfo, cts);
+Task.Factory.StartNew(() => { RunAndWatch(gameInfo, cts); }, cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
 Console.WriteLine("Wait Any Key for Stop");
 Console.ReadLine();
@@ -144,57 +144,90 @@ void AddCharactersData(in GameInfo gameInfo)
 	}
 }
 
+bool TryFindExistProc(GameInfo gameData, out Process foundedProcess)
+{
+	foundedProcess = default;
+	var file = new FileInfo(gameData.ElementExePath);
+	var processes = Process.GetProcesses();
+	foreach (var process in processes)
+		try
+		{
+			if (file.Name.Contains(process.ProcessName, StringComparison.OrdinalIgnoreCase) == false)
+				continue;
+
+			Console.WriteLine($"Found element client process {process.ProcessName}:{process.Id}");
+			var cmd = process.GetCommandLineArgs();
+			var args = cmd.Split(' ');
+			var loginNameData = (from s in args where s.Contains("user") select s.Split(':')).FirstOrDefault();
+			if (loginNameData == null || loginNameData.Length < 2)
+				continue;
+
+			var logginName = loginNameData[1];
+			var existProcess = gameData.Characters.FirstOrDefault(cd => cd.Login.Contains(logginName, StringComparison.OrdinalIgnoreCase));
+			if (existProcess != null)
+			{
+				Console.WriteLine($"Attach to {process.ProcessName}:{process.Id}");
+				foundedProcess = process;
+				return true;
+			}
+		}
+		catch (Exception e)
+		{
+		}
+
+	return false;
+}
+
 void RunAndWatch(GameInfo gameData, CancellationTokenSource cancellationTokenSource)
 {
-	foreach (var characterData in gameData.Characters)
-		Task.Run(async () =>
+	var tasks = new Task[gameData.Characters.Count];
+	for (var i = 0; i < gameData.Characters.Count; i++)
+	{
+		var characterData = gameData.Characters[i];
+		tasks[i] = new Task(async () => await WatchForClient(characterData), cancellationTokenSource.Token);
+	}
+
+	foreach (var task in tasks)
+	{
+		task.Start();
+	}
+
+	do
+	{
+		var failedTask = Task.WaitAny(tasks, cancellationTokenSource.Token);
+		tasks[failedTask] = Task.Run(async () => await WatchForClient(gameData.Characters[failedTask]), cancellationTokenSource.Token);
+	} while (cancellationTokenSource.IsCancellationRequested == false);
+
+	return;
+
+	async Task WatchForClient(CharacterData characterData)
+	{
+		if (TryFindExistProc(gameData, out var existProc)) await existProc.WaitForExitAsync(cancellationTokenSource.Token);
+
+		var file = new FileInfo(gameData.ElementExePath);
+		var additionalArgs = string.Empty;
+
+		if (characterData.LowQuality) additionalArgs += "nogfx";
+
+		var startInfo = new ProcessStartInfo
 		{
-			var file = new FileInfo(gameData.ElementExePath);
-			var additionalArgs = string.Empty;
-			if (characterData.LowQuality) additionalArgs += "nogfx";
-			var startInfo = new ProcessStartInfo
-			{
-				FileName = file.FullName,
-				WorkingDirectory = file.Directory.FullName,
-				Arguments =
-					$@"{file.Name} startbypatcher arc:1 novid {additionalArgs} user:{characterData.Login} pwd:{characterData.Password} role:{characterData.Name}"
-			};
+			FileName = file.FullName, WorkingDirectory = file.Directory.FullName,
+			Arguments =
+				$@"{file.Name} startbypatcher arc:1 novid {additionalArgs} user:{characterData.Login} pwd:{characterData.Password} role:{characterData.Name}"
+		};
 
-			var processes = Process.GetProcesses();
-			foreach (var process in processes)
-				try
-				{
-					if (file.Name.Contains(process.ProcessName, StringComparison.OrdinalIgnoreCase) == false)
-						continue;
+		while (cancellationTokenSource.IsCancellationRequested == false)
+		{
+			Console.WriteLine($"Run {characterData.Login}:{characterData.Name} -> {DateTime.Now}");
+			using var process = new Process();
+			process.StartInfo = startInfo;
+			process.Start();
+			SpinWait.SpinUntil(() => process.HasExited || process.MainWindowHandle != IntPtr.Zero);
 
-					Console.WriteLine($"Found {process.ProcessName}:{process.Id}");
-					var cmd = process.GetCommandLineArgs();
-					var args = cmd.Split(' ');
-					var loginNameData = (from s in args where s.Contains("user") select s.Split(':')).FirstOrDefault();
-					if (loginNameData == null || loginNameData.Length < 2)
-						continue;
-					
-					var logginName = loginNameData[1];
-					if (characterData.Login.Contains(logginName, StringComparison.OrdinalIgnoreCase))
-					{
-						Console.WriteLine($"Attach to {process.ProcessName}:{process.Id}");
-						await process.WaitForExitAsync(cancellationTokenSource.Token);
-						break;
-					}
-				}
-				catch (Exception e)
-				{
-				}
+			if (process.HasExited) continue;
 
-			while (cancellationTokenSource.IsCancellationRequested == false)
-			{
-				Console.WriteLine($"Run {characterData.Login}:{characterData.Name} -> {DateTime.Now}");
-				using var process = new Process();
-				process.StartInfo = startInfo;
-				process.Start();
-				SpinWait.SpinUntil(() => process.HasExited || process.MainWindowHandle != IntPtr.Zero);
-				if (!process.HasExited) process.SetWindowText($"{characterData.Login}:{characterData.Name}");
-				await process.WaitForExitAsync(cancellationTokenSource.Token);
-			}
-		}, cancellationTokenSource.Token);
+			process.SetWindowText($"{characterData.Login}:{characterData.Name}");
+			await process.WaitForExitAsync(cancellationTokenSource.Token);
+		}
+	}
 }
